@@ -24,8 +24,14 @@ TEST(Channel, capacity0)
     int i = 0;
     {
         EXPECT_EQ(ch.size(), 0u);
-        go [&]{ ch << 1; EXPECT_YIELD(1);};
-        go [&]{ ch >> i; EXPECT_YIELD(0);};
+        go [&]{
+            ch << 1;
+            EXPECT_YIELD(1);
+        };
+        go [&]{
+            ch >> i;
+            EXPECT_YIELD(0);
+        };
         WaitUntilNoTask();
         EXPECT_EQ(i, 1);
 

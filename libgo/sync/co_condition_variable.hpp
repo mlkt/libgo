@@ -1,17 +1,10 @@
-#include "../common/error.h"
-#include "co_condition_variable.h"
-
 namespace co
 {
 
-ConditionVariableAny::ConditionVariableAny()
+template <typename T>
+ConditionVariableAny<T>::~ConditionVariableAny()
 {
-    checkIter_ = nullptr;
-}
-
-ConditionVariableAny::~ConditionVariableAny()
-{
-    std::unique_lock<LFLock> lock(lock_);
+    std::unique_lock<lock_t> lock(lock_);
 
     checkIter_ = nullptr;
     for (;;) {
@@ -28,18 +21,21 @@ ConditionVariableAny::~ConditionVariableAny()
         }
 
         assert(false);
-        ThrowException("libgo.ConditionVariableAny still have waiters when deconstructed.");
+        ThrowException("libgo.ConditionVariableAny<T> still have waiters when deconstructed.");
     }
 }
 
-bool ConditionVariableAny::notify_one()
+template <typename T>
+bool ConditionVariableAny<T>::notify_one(notify_operate op, T *pt)
 {
-    std::unique_lock<LFLock> lock(lock_);
-
+    std::unique_lock<lock_t> lock(lock_);
     for (;;) {
         Entry *entry = queue_.pop();
         if (!entry)
             return false;
+
+        IncursivePtr<Entry> sptr(entry);
+        entry->DecrementRef();
 
         if (checkIter_ == entry)
             checkIter_ = nullptr;
@@ -51,32 +47,41 @@ bool ConditionVariableAny::notify_one()
         if (!entry->suspendEntry) {
             // 原生线程
             cv_.notify_one();
-            if (entry->onWakeup)
-                entry->onWakeup();
-            return true;
-        }
-
-        if (!Processer::Wakeup(entry->suspendEntry)) {
+        } else if (!Processer::Wakeup(entry->suspendEntry)) {
             continue;
         }
 
-        if (entry->onWakeup)
-            entry->onWakeup();
+        switch (op) {
+            case notify_read:
+                if (pt && entry->value)
+                    *pt = std::move(*entry->value);
+                break;
+
+            case notify_write:
+                if (pt && entry->value)
+                    *entry->value = std::move(*pt);
+                break;
+            default:
+                break;
+        }
+
         return true;
     }
-
-    return false;
 }
 
-size_t ConditionVariableAny::notify_all()
+template <typename T>
+size_t ConditionVariableAny<T>::notify_all()
 {
-    std::unique_lock<LFLock> lock(lock_);
+    std::unique_lock<lock_t> lock(lock_);
 
     size_t n = 0;
     for (;;) {
         Entry *entry = queue_.pop();
         if (!entry)
             break;
+
+        IncursivePtr<Entry> sptr(entry);
+        entry->DecrementRef();
 
         if (checkIter_ == entry)
             checkIter_ = nullptr;
@@ -89,8 +94,6 @@ size_t ConditionVariableAny::notify_all()
             // 原生线程
             cv_.notify_one();
             ++n;
-            if (entry->onWakeup)
-                entry->onWakeup();
             continue;
         }
 
@@ -98,22 +101,22 @@ size_t ConditionVariableAny::notify_all()
             continue;
         }
 
-        if (entry->onWakeup)
-            entry->onWakeup();
         ++n;
     }
 
     return n;
 }
 
-bool ConditionVariableAny::empty()
+template <typename T>
+bool ConditionVariableAny<T>::empty()
 {
-    std::unique_lock<LFLock> lock(lock_);
+    std::unique_lock<lock_t> lock(lock_);
     return queue_.empty();
 }
 
-void ConditionVariableAny::AddWaiter(Entry * entry) {
-    std::unique_lock<LFLock> lock(lock_);
+template <typename T>
+void ConditionVariableAny<T>::AddWaiter(Entry * entry) {
+    std::unique_lock<lock_t> lock(lock_);
     queue_.push(entry);
 
     if (queue_.size() < 8) {

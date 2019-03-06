@@ -51,6 +51,7 @@ void test_switch(int coro)
 
 void test_channel(int capa, int n)
 {
+    char buf[1024] = {};
     co_chan<bool> ch(capa);
     std::atomic_int c {0};
 //    GProfilerScope prof;
@@ -113,19 +114,19 @@ int main()
 {
     test_atomic();
 
-    go []{ test_mutex(1000000); };
-    WaitUntilNoTask();
+//    go []{ test_mutex(1000000); };
+//    WaitUntilNoTask();
 
-    go []{ test_switch(1); };
-    WaitUntilNoTask();
+//    go []{ test_switch(1); };
+//    WaitUntilNoTask();
 
-    go []{ test_switch(1000); };
-    WaitUntilNoTask();
+//    go []{ test_switch(1000); };
+//    WaitUntilNoTask();
 
     go []{ test_channel(0, 10000000); };
 //    go []{ test_channel(0, 10000000 * 10); };
     WaitUntilNoTask();
-//    return 0;
+    return 0;
 
     go []{ test_channel(1, N); };
     WaitUntilNoTask();
