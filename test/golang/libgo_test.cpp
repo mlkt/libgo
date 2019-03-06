@@ -9,6 +9,7 @@
 #define TEST_MAX_THREAD 1
 #endif
 #include "../gtest_unit/gtest_exit.h"
+#include "../profiler.h"
 using namespace std;
 
 static const int N = 10000000;
@@ -50,22 +51,70 @@ void test_switch(int coro)
 
 void test_channel(int capa, int n)
 {
-    co_chan<bool> c(capa);
+    co_chan<bool> ch(capa);
+    std::atomic_int c {0};
+//    GProfilerScope prof;
     auto start = chrono::steady_clock::now();
-    go [=]{
-        for (int i = 0; i < n; ++i) {
-            c << true;
-        }
-    };
-    for (int i = 0; i < n; ++i)
-        c >> nullptr;
+    for (int i = 0; i < TEST_MIN_THREAD; ++i) {
+        c += 2;
+        go [&]{
+            for (int i = 0; i < n; ++i) {
+                ch << true;
+            }
+            --c;
+        };
+
+        go [&]{
+            for (int i = 0; i < n; ++i) {
+                ch >> nullptr;
+            }
+            --c;
+        };
+    }
+
+    while (c) {
+        usleep(1000);
+    }
     auto end = chrono::steady_clock::now();
     dump("BenchmarkChannel_" + std::to_string(capa), n, start, end);
+}
+
+void test_mutex(int n)
+{
+//    typedef co::LFLock mutex_t;
+//    typedef std::mutex mutex_t;
+    typedef co_mutex mutex_t;
+    mutex_t mtx;
+    std::atomic_int c {0};
+    long val = 0;
+    auto start = chrono::steady_clock::now();
+    for (int i = 0; i < TEST_MIN_THREAD; ++i) {
+        ++c;
+        go [&]{
+            for (int i = 0; i < n; ++i) {
+                std::unique_lock<mutex_t> lock(mtx);
+                free(malloc(400));
+                ++val;
+            }
+            --c;
+        };
+    }
+
+    while (c) {
+        usleep(1000);
+    }
+    auto end = chrono::steady_clock::now();
+    dump("BenchmarkMutex_" + std::to_string(val), val, start, end);
+    if (val != n * TEST_MIN_THREAD)
+        printf("ERROR, val=%ld\n", val);
 }
 
 int main()
 {
     test_atomic();
+
+    go []{ test_mutex(1000000); };
+    WaitUntilNoTask();
 
     go []{ test_switch(1); };
     WaitUntilNoTask();
@@ -73,12 +122,14 @@ int main()
     go []{ test_switch(1000); };
     WaitUntilNoTask();
 
-    go []{ test_channel(0, N); };
+    go []{ test_channel(0, 10000000); };
+//    go []{ test_channel(0, 10000000 * 10); };
     WaitUntilNoTask();
+//    return 0;
 
     go []{ test_channel(1, N); };
     WaitUntilNoTask();
 
-    go []{ test_channel(10000, 10000); };
+    go []{ test_channel(1000, 1000000); };
     WaitUntilNoTask();
 }
