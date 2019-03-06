@@ -28,7 +28,7 @@ static int staticInitialize()
     TaskRefInit(Affinity);
     TaskRefInit(Location);
     TaskRefInit(DebugInfo);
-    TaskRefInit(SuspendId);
+//    TaskRefInit(SuspendId);
 
     // cls
     TaskRefInit(ClsMap);

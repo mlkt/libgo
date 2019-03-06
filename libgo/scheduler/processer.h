@@ -110,7 +110,7 @@ public:
     static SuspendEntry Suspend(FastSteadyClock::time_point timepoint);
 
     // 唤醒协程
-    static bool Wakeup(SuspendEntry const& entry);
+    static bool Wakeup(SuspendEntry const& entry, std::function<void()> const& functor = NULL);
 
     // 测试一个SuspendEntry是否还可能有效
     static bool IsExpire(SuspendEntry const& entry);
@@ -163,7 +163,7 @@ private:
 
     SuspendEntry SuspendBySelf(Task* tk);
 
-    bool WakeupBySelf(IncursivePtr<Task> const& tkPtr, uint64_t id);
+    bool WakeupBySelf(IncursivePtr<Task> const& tkPtr, uint64_t id, std::function<void()> const& functor);
 };
 
 ALWAYS_INLINE void Processer::StaticCoYield()
