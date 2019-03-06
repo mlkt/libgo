@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/config.h"
+#include "../common/ts_queue.h"
 #include "../scheduler/processer.h"
 #include <list>
 #include <condition_variable>
@@ -16,21 +17,20 @@ class ConditionVariableAny
     typedef std::function<void()> Func;
 
     struct Entry
+        : public TSQueueHook, public SharedRefObject
     {
         Processer::SuspendEntry suspendEntry;
 
         // 控制是否超时的标志位
-        std::shared_ptr<LFLock> noTimeoutLock;
+        LFLock noTimeoutLock;
 
         // 唤醒成功后, 在唤醒线程做的事情
         Func onWakeup;
-
-        Entry() : noTimeoutLock(std::make_shared<LFLock>()) {}
     };
 
     LFLock lock_;
-    std::list<Entry> queue_;
-    std::list<Entry>::iterator checkIter_;
+    TSQueue<Entry, false> queue_;
+    Entry* checkIter_;
 
     // 兼容原生线程
     std::condition_variable_any cv_;
@@ -46,12 +46,15 @@ public:
 
     template <typename LockType>
     std::cv_status wait(LockType & lock, Func onWakeup = Func()) {
-        Entry entry;
-        entry.onWakeup = onWakeup;
+        Entry *entry = new Entry;
+        IncursivePtr<Entry> sptr(entry);
+        entry->DecrementRef();
+
+        entry->onWakeup = onWakeup;
 
         if (Processer::IsCoroutine()) {
             // 协程
-            entry.suspendEntry = Processer::Suspend();
+            entry->suspendEntry = Processer::Suspend();
             AddWaiter(entry);
             lock.unlock();
             Processer::StaticCoYield();
@@ -62,17 +65,20 @@ public:
             cv_.wait(lock);
         }
 
-        return entry.noTimeoutLock->try_lock() ? std::cv_status::timeout : std::cv_status::no_timeout;
+        return entry->noTimeoutLock.try_lock() ? std::cv_status::timeout : std::cv_status::no_timeout;
     }
 
     template <typename LockType, typename Rep, typename Period>
     std::cv_status wait_for(LockType & lock, std::chrono::duration<Rep, Period> const& duration, Func onWakeup = Func()) {
-        Entry entry;
-        entry.onWakeup = onWakeup;
+        Entry *entry = new Entry;
+        IncursivePtr<Entry> sptr(entry);
+        entry->DecrementRef();
+
+        entry->onWakeup = onWakeup;
 
         if (Processer::IsCoroutine()) {
             // 协程
-            entry.suspendEntry = Processer::Suspend(duration);
+            entry->suspendEntry = Processer::Suspend(duration);
             AddWaiter(entry);
             lock.unlock();
             Processer::StaticCoYield();
@@ -83,17 +89,20 @@ public:
             cv_.wait_for(lock, duration);
         }
 
-        return entry.noTimeoutLock->try_lock() ? std::cv_status::timeout : std::cv_status::no_timeout;
+        return entry->noTimeoutLock.try_lock() ? std::cv_status::timeout : std::cv_status::no_timeout;
     }
 
     template <typename LockType, typename Clock, typename Duration>
     std::cv_status wait_until(LockType & lock, std::chrono::time_point<Clock, Duration> const& timepoint, Func onWakeup = Func()) {
-        Entry entry;
-        entry.onWakeup = onWakeup;
+        Entry *entry = new Entry;
+        IncursivePtr<Entry> sptr(entry);
+        entry->DecrementRef();
+
+        entry->onWakeup = onWakeup;
 
         if (Processer::IsCoroutine()) {
             // 协程
-            entry.suspendEntry = Processer::Suspend(timepoint);
+            entry->suspendEntry = Processer::Suspend(timepoint);
             AddWaiter(entry);
             lock.unlock();
             Processer::StaticCoYield();
@@ -104,7 +113,7 @@ public:
             cv_.wait_until(lock, timepoint);
         }
 
-        return entry.noTimeoutLock->try_lock() ? std::cv_status::timeout : std::cv_status::no_timeout;
+        return entry->noTimeoutLock.try_lock() ? std::cv_status::timeout : std::cv_status::no_timeout;
     }
 
     template <typename LockType, typename Rep, typename Period>
@@ -118,7 +127,7 @@ public:
     }
 
 private:
-    void AddWaiter(Entry const& entry);
+    void AddWaiter(Entry *entry);
 };
 
 } //namespace co

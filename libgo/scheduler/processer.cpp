@@ -32,7 +32,10 @@ void Processer::AddTask(Task *tk)
     std::unique_lock<TaskQueue::lock_t> lock(newQueue_.LockRef());
     newQueue_.pushWithoutLock(tk);
     newQueue_.AssertLink();
-    cv_.notify_all();
+    if (waiting_)
+        cv_.notify_all();
+    else
+        notified_ = true;
 }
 
 void Processer::AddTask(SList<Task> && slist)
@@ -41,13 +44,19 @@ void Processer::AddTask(SList<Task> && slist)
     std::unique_lock<TaskQueue::lock_t> lock(newQueue_.LockRef());
     newQueue_.pushWithoutLock(std::move(slist));
     newQueue_.AssertLink();
-    cv_.notify_all();
+    if (waiting_)
+        cv_.notify_all();
+    else
+        notified_ = true;
 }
 
 void Processer::NotifyCondition()
 {
     std::unique_lock<TaskQueue::lock_t> lock(newQueue_.LockRef());
-    cv_.notify_all();
+    if (waiting_)
+        cv_.notify_all();
+    else
+        notified_ = true;
 }
 
 void Processer::Process()
@@ -184,11 +193,13 @@ void Processer::WaitCondition()
 {
     GC();
     std::unique_lock<TaskQueue::lock_t> lock(newQueue_.LockRef());
-    if (!runnableQueue_.empty() || !newQueue_.emptyUnsafe())
+    if (notified_) {
+        notified_ = false;
         return ;
+    }
 
     waiting_ = true;
-    cv_.wait_for(lock, std::chrono::milliseconds(105));
+    cv_.wait(lock);
     waiting_ = false;
 }
 
