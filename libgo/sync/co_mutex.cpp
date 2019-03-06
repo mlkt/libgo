@@ -4,53 +4,82 @@
 namespace co
 {
 
-CoMutex::CoMutex() : isLocked_(false)
+CoMutex::CoMutex()
 {
+    sem_ = 1;
+#if BY_MUTEX
+#else
+    notified_.try_lock();
+#endif
 }
 
 CoMutex::~CoMutex()
 {
-    assert(lock_.try_lock());
-    assert(!isLocked_);
+//    assert(lock_.try_lock());
 }
 
 void CoMutex::lock()
 {
-    std::unique_lock<LFLock> lock(lock_);
+    if (--sem_ == 0)
+        return ;
 
-retry:
-    if (!isLocked_) {
-        isLocked_ = true;
+#if BY_MUTEX
+    std::unique_lock<lock_t> lock(lock_);
+    if (notified_) {
+        notified_ = false;
         return ;
     }
-
     cv_.wait(lock);
-    goto retry;
+#else
+    if (notified_.try_lock())
+        return ;
+
+    Processer::SuspendEntry* entry = new Processer::SuspendEntry(Processer::Suspend());
+    waitQueue_.push(entry);
+
+    if (notified_.try_lock()) {
+        Processer::Wakeup(*entry);
+    }
+
+    Processer::StaticCoYield();
+#endif
 }
 
 bool CoMutex::try_lock()
 {
-    std::unique_lock<LFLock> lock(lock_);
-    if (!isLocked_) {
-        isLocked_ = true;
+    if (--sem_ == 0)
         return true;
-    }
+
+    ++sem_;
     return false;
 }
 
 bool CoMutex::is_lock()
 {
-    std::unique_lock<LFLock> lock(lock_);
-    return isLocked_;
+    return sem_ < 1;
 }
 
 void CoMutex::unlock()
 {
-    std::unique_lock<LFLock> lock(lock_);
-    assert(isLocked_);
-    isLocked_ = false;
-    cv_.notify_one();
-    return ;
+    if (++sem_ == 1)
+        return ;
+
+#if BY_MUTEX
+    std::unique_lock<lock_t> lock(lock_);
+    if (!cv_.notify_one())
+        notified_ = true;
+#else
+    Processer::SuspendEntry* entry;
+    while (waitQueue_.pop(entry)) {
+        if (Processer::Wakeup(*entry)) {
+            delete entry;
+            return ;
+        }
+        delete entry;
+    }
+
+    notified_.unlock();
+#endif
 }
 
 } //namespace co
