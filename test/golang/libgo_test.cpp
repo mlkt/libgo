@@ -56,7 +56,8 @@ void test_channel(int capa, int n)
     std::atomic_int c {0};
 //    GProfilerScope prof;
     auto start = chrono::steady_clock::now();
-    for (int i = 0; i < TEST_MIN_THREAD; ++i) {
+    const int loop = std::max(TEST_MIN_THREAD / 2, 1);
+    for (int i = 0; i < loop; ++i) {
         c += 2;
         go [&]{
             for (int i = 0; i < n; ++i) {
@@ -77,7 +78,7 @@ void test_channel(int capa, int n)
         usleep(1000);
     }
     auto end = chrono::steady_clock::now();
-    dump("BenchmarkChannel_" + std::to_string(capa), n, start, end);
+    dump("BenchmarkChannel_" + std::to_string(capa), n * loop, start, end);
 }
 
 void test_mutex(int n)

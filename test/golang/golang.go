@@ -131,7 +131,7 @@ func main() {
 	fmt.Printf("%s    %d    %d ns/op    %d w/s\n", "Channel_1", n, nanos/n, 100000 * n / nanos);
 
 	t = time.Now()
-	Channel(1000, N)
+	Channel(10000, N)
 	nanos = time.Since(t).Nanoseconds()
-	fmt.Printf("%s    %d    %d ns/op    %d w/s\n", "Channel_N", n, nanos/n, 100000 * n / nanos);
+	fmt.Printf("%s    %d    %d ns/op    %d w/s\n", "Channel_10000", n, nanos/n, 100000 * n / nanos);
 }

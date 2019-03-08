@@ -4,6 +4,7 @@
 #include "../scheduler/scheduler.h"
 #include "co_condition_variable.h"
 #include <boost/lockfree/queue.hpp>
+#include "co_mutex.h"
 
 namespace co
 {
@@ -45,7 +46,7 @@ public:
         return *this;
     }
 
-    bool TryPush(T t) const
+   bool TryPush(T t) const
     {
         return impl_->Push(t, false);
     }
@@ -119,16 +120,62 @@ public:
 private:
     class ChannelImpl : public IdCounter<ChannelImpl>
     {
-        typedef std::mutex lock_t;
+//        typedef std::mutex lock_t;
+        typedef co_mutex lock_t;
         lock_t lock_;
         const std::size_t capacity_;
         bool closed_;
         std::deque<T> queue_;
         uint64_t dbg_mask_;
 
-#define BY_LOCKFREE_QUEUE 1
+#define BY_FALGS 1
+#define BY_LOCKFREE_QUEUE 0
+#define BY_PAIR 0
 
-#if BY_LOCKFREE_QUEUE
+#if BY_FALGS
+        struct Entry {
+            Processer::SuspendEntry entry;
+            atomic_t<T*> pvalue;
+
+            Entry() : pvalue(nullptr) {}
+            Entry(Processer::SuspendEntry && e, T* p) : entry(e), pvalue(p) {}
+        };
+
+        typedef boost::lockfree::queue<Entry*, boost::lockfree::capacity<16>> mpmc_queue_t;
+        mpmc_queue_t wq_;
+        mpmc_queue_t rq_;
+
+        // number of read wait << 32 | number of write wait
+        atomic_t<size_t> wait_ {0};
+        static const size_t write1 = 1;
+        static const size_t writeMask = 0xffffffff;
+        static const size_t read1 = ((size_t)1) << 32;
+        static const size_t readMask = 0xffffffff00000000;
+        static const int kSpinCount = 4000;
+
+#elif BY_PAIR
+        // pointer to a Pair struct in coroutine/thread stack.
+        atomic_t<size_t> pair_ = 0;
+
+        enum pair_flag {
+            op_write = 0x1,
+            op_read = 0x0,
+            op_flag = 0x1,
+
+            wait_write = 0x2,
+            wait_read = 0x4,
+        };
+
+        struct alignof(8) Pair
+        {
+            atomic_t<size_t> pair{0}; // looks like pair_
+            T* pt;
+        };
+
+        ConditionVariableAny<T> wq_;
+        ConditionVariableAny<T> rq_;
+
+#elif BY_LOCKFREE_QUEUE
         struct Entry {
             Processer::SuspendEntry entry;
             atomic_t<T*> pvalue;
@@ -146,6 +193,8 @@ private:
         Slot slots_[c_slot];
         atomic_t<size_t> rSeek_ {0};
         atomic_t<size_t> wSeek_ {0};
+
+
 
 //        typedef boost::lockfree::queue<Entry*, boost::lockfree::fixed_sized<false>> mpmc_queue_t;
 //        typedef std::queue<Entry> mpmc_queue_t;
@@ -189,7 +238,68 @@ private:
         // write
         bool Push(T t, bool bWait, FastSteadyClock::time_point deadline = FastSteadyClock::time_point{})
         {
-#if BY_LOCKFREE_QUEUE
+#if BY_FALGS
+            T* pt = &t;
+            int spin = 0;
+            while (wait_.load(std::memory_order_acquire) & readMask) {
+retry:
+                Entry* entry = nullptr;
+                if (!rq_.pop(entry)) {
+                    if (++spin >= kSpinCount) {
+                        spin = 0;
+//                        printf("spin by push\n");
+                        Processer::StaticCoYield();
+                    }
+                    continue;
+                }
+                std::unique_ptr<Entry> ep(entry);
+
+                if (Processer::Wakeup(entry->entry, [=]{ *entry->pvalue = *pt; })) {
+                    wait_ -= read1;
+                    return true;
+                }
+            }
+
+            size_t wait = wait_.load(std::memory_order_relaxed);
+            do {
+                if (wait & readMask)
+                    goto retry;
+            } while (!wait_.compare_exchange_weak(wait, wait + write1,
+                        std::memory_order_acq_rel, std::memory_order_relaxed));
+
+            Entry *entry = new Entry();
+            entry->entry = Processer::Suspend();
+            entry->pvalue = pt;
+            while (!wq_.push(entry));
+            Processer::StaticCoYield();
+            return true;
+
+#elif BY_PAIR
+            Pair here;
+            here.pt = &t;
+
+            // 1.抢pair_
+            size_t set = &here;
+            do {
+                set &= ~0x7;
+                set |= op_write;
+
+                size_t p = pair_.load(std::memory_order_relaxed);
+
+                // no reader now.
+                if (p & ~0x7 == 0) {
+                    if (p & wait_read) {
+                        std::unique_lock<lock_t> lock(lock_);
+                        if (rq_.notify_one(notify_operate::notify_write, &t))
+                            return true;
+                    }
+
+                    if (p & wait_write)
+                        set |= wait_write;
+                }
+            }
+
+#elif BY_LOCKFREE_QUEUE
             if (closed_) return false;
 
             size_t wSeek = ++wSeek_;
@@ -207,7 +317,7 @@ private:
                     break;
                 }
 
-//                *pt = t;
+                *pt = t;
                 slot.wait.pvalue.store(nullptr, std::memory_order_relaxed);
                 slot.sem.store(0, std::memory_order_relaxed);
                 Processer::Wakeup(slot.wait.entry);
@@ -297,7 +407,43 @@ private:
         // read
         bool Pop(T & t, bool bWait, FastSteadyClock::time_point deadline = FastSteadyClock::time_point{})
         {
-#if BY_LOCKFREE_QUEUE
+#if BY_FALGS
+            T* pt = &t;
+            int spin = 0;
+            while (wait_.load(std::memory_order_acquire) & writeMask) {
+retry:
+                Entry* entry = nullptr;
+                if (!wq_.pop(entry)) {
+                    if (++spin >= kSpinCount) {
+                        spin = 0;
+                        Processer::StaticCoYield();
+                    }
+                    continue;
+                }
+                std::unique_ptr<Entry> ep(entry);
+
+                if (Processer::Wakeup(entry->entry, [=]{ *pt = *entry->pvalue; })) {
+                    wait_ -= write1;
+                    return true;
+                }
+            }
+
+            size_t wait = wait_.load(std::memory_order_relaxed);
+            do {
+                if (wait & writeMask)
+                    goto retry;
+            } while (!wait_.compare_exchange_weak(wait, wait + read1,
+                        std::memory_order_acq_rel, std::memory_order_relaxed));
+
+            Entry *entry = new Entry();
+            entry->entry = Processer::Suspend();
+            entry->pvalue = pt;
+            while (!rq_.push(entry));
+            Processer::StaticCoYield();
+            return true;
+
+#elif BY_LOCKFREE_QUEUE
+
             size_t rSeek = ++rSeek_;
             Slot & slot = slots_[rSeek % c_slot];
 
@@ -313,7 +459,7 @@ private:
                     break;
                 }
 
-//                t = std::move(*pt);
+                t = std::move(*pt);
                 slot.wait.pvalue.store(nullptr, std::memory_order_relaxed);
                 slot.sem.store(0, std::memory_order_relaxed);
                 Processer::Wakeup(slot.wait.entry);
