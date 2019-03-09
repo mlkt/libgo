@@ -113,6 +113,9 @@ void test_mutex(int n)
 
 int main()
 {
+//    co_opt.debug = co::dbg_channel;
+//    co_opt.debug_output = fopen("log", "w");
+
     test_atomic();
 
 //    go []{ test_mutex(1000000); };
@@ -124,7 +127,9 @@ int main()
 //    go []{ test_switch(1000); };
 //    WaitUntilNoTask();
 
-    go []{ test_channel(0, 10000000); };
+//    go []{ test_channel(0, 20000); };
+    go []{ test_channel(0, 1000000); };
+//    go []{ test_channel(0, 10000000); };
 //    go []{ test_channel(0, 10000000 * 10); };
     WaitUntilNoTask();
     return 0;

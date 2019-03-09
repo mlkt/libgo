@@ -5,6 +5,7 @@
 #include "co_condition_variable.h"
 #include <boost/lockfree/queue.hpp>
 #include "co_mutex.h"
+#include "wait_queue.h"
 
 namespace co
 {
@@ -46,7 +47,7 @@ public:
         return *this;
     }
 
-   bool TryPush(T t) const
+    bool TryPush(T t) const
     {
         return impl_->Push(t, false);
     }
@@ -128,22 +129,21 @@ private:
         std::deque<T> queue_;
         uint64_t dbg_mask_;
 
-#define BY_FALGS 1
-#define BY_LOCKFREE_QUEUE 0
-#define BY_PAIR 0
-
-#if BY_FALGS
-        struct Entry {
+        struct Entry : public WaitQueueHook {
             Processer::SuspendEntry entry;
-            atomic_t<T*> pvalue;
+            T* pvalue;
+            T value;
+            bool waiting;
 
-            Entry() : pvalue(nullptr) {}
+            Entry() : pvalue(nullptr), waiting(true) {}
             Entry(Processer::SuspendEntry && e, T* p) : entry(e), pvalue(p) {}
         };
 
-        typedef boost::lockfree::queue<Entry*, boost::lockfree::capacity<16>> mpmc_queue_t;
-        mpmc_queue_t wq_;
-        mpmc_queue_t rq_;
+//        typedef boost::lockfree::queue<Entry*, boost::lockfree::capacity<1>> wait_queue_t;
+//        typedef boost::lockfree::queue<Entry*> wait_queue_t;
+        typedef WaitQueue<Entry> wait_queue_t;
+        wait_queue_t wq_;
+        wait_queue_t rq_;
 
         // number of read wait << 32 | number of write wait
         atomic_t<size_t> wait_ {0};
@@ -153,64 +153,137 @@ private:
         static const size_t readMask = 0xffffffff00000000;
         static const int kSpinCount = 4000;
 
-#elif BY_PAIR
-        // pointer to a Pair struct in coroutine/thread stack.
-        atomic_t<size_t> pair_ = 0;
-
-        enum pair_flag {
-            op_write = 0x1,
-            op_read = 0x0,
-            op_flag = 0x1,
-
-            wait_write = 0x2,
-            wait_read = 0x4,
-        };
-
-        struct alignof(8) Pair
-        {
-            atomic_t<size_t> pair{0}; // looks like pair_
-            T* pt;
-        };
-
-        ConditionVariableAny<T> wq_;
-        ConditionVariableAny<T> rq_;
-
-#elif BY_LOCKFREE_QUEUE
-        struct Entry {
-            Processer::SuspendEntry entry;
-            atomic_t<T*> pvalue;
-
-            Entry() : pvalue(nullptr) {}
-            Entry(Processer::SuspendEntry && e, T* p) : entry(e), pvalue(p) {}
-        };
-
-        struct Slot {
-            Entry wait;
-            atomic_t<int> sem {0};
-        };
-        static const size_t c_slot = 128;
-
-        Slot slots_[c_slot];
-        atomic_t<size_t> rSeek_ {0};
-        atomic_t<size_t> wSeek_ {0};
-
-
-
-//        typedef boost::lockfree::queue<Entry*, boost::lockfree::fixed_sized<false>> mpmc_queue_t;
-//        typedef std::queue<Entry> mpmc_queue_t;
-//        mpmc_queue_t rq_;
-//        mpmc_queue_t wq_;
-#else
-        // 兼容原生线程
-        ConditionVariableAny<T> wCv_;
-        ConditionVariableAny<T> rCv_;
-#endif
-
     public:
         explicit ChannelImpl(std::size_t capacity)
             : capacity_(capacity), closed_(false), dbg_mask_(dbg_all)
+            , wq_(NULL, [this](Entry* entry, size_t size){ return this->onPush(entry, size); }
+                    , capacity ? capacity + 1 : (size_t)-1, &onNotify)
+            , rq_(NULL, NULL, (size_t)-1, NULL)
         {
             DebugPrint(dbg_mask_ & dbg_channel, "[id=%ld] Channel init. capacity=%lu", this->getId(), capacity);
+        }
+
+        static bool check(Entry* entry) {
+            if (!entry->waiting) return true;
+            return !entry->entry.IsExpire();
+        }
+        
+        bool onPush(Entry* entry, size_t size) {
+            if (size < capacity_) {
+                entry->waiting = false;
+                entry->value = *entry->pvalue;
+                return false;
+            } else {
+                entry->entry = Processer::Suspend();
+                return true;
+            }
+        }
+
+        static bool onNotify(Entry* entry) {
+            assert(entry->waiting);
+            if (Processer::Wakeup(entry->entry, [=]{ entry->value = *entry->pvalue; })) {
+                entry->waiting = false;
+                return true;
+            }
+            return false;
+        }
+
+        // write
+        bool Push(T t, bool bWait, FastSteadyClock::time_point deadline = FastSteadyClock::time_point{})
+        {
+            DebugPrint(dbg_channel, "[id=%ld] Push ->", this->getId());
+
+            T* pt = &t;
+            int spin = 0;
+
+            size_t wait;
+            for (;;) {
+                wait = wait_.load(std::memory_order_relaxed);
+                if (wait & readMask) {
+                    Entry* entry = nullptr;
+                    if (!rq_.pop(entry)) {
+                        if (++spin >= kSpinCount) {
+                            spin = 0;
+//                            printf("spin by push\n");
+                            Processer::StaticCoYield();
+                        }
+                        continue;
+                    }
+                    DebugPrint(dbg_channel, "[id=%ld] Push Notify.", this->getId());
+                    std::unique_ptr<Entry> ep(entry);
+
+                    if (Processer::Wakeup(entry->entry, [=]{ *entry->pvalue = *pt; })) {
+                        wait_ -= read1;
+                        return true;
+                    }
+                    continue;
+                }
+
+                if (wait_.compare_exchange_weak(wait, wait + write1,
+                        std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
+            }
+
+            Entry *entry = new Entry();
+            entry->pvalue = pt;
+            if (wq_.push(entry)) {
+                DebugPrint(dbg_channel, "[id=%ld] Push waiting.", this->getId());
+                Processer::StaticCoYield();
+                DebugPrint(dbg_channel, "[id=%ld] Push complete.", this->getId());
+            } else {
+                DebugPrint(dbg_channel, "[id=%ld] Push no wait.", this->getId());
+            }
+            return true;
+        }
+
+        // read
+        bool Pop(T & t, bool bWait, FastSteadyClock::time_point deadline = FastSteadyClock::time_point{})
+        {
+            DebugPrint(dbg_channel, "[id=%ld] Pop ->", this->getId());
+
+            T* pt = &t;
+            int spin = 0;
+
+            size_t wait;
+            for (;;) {
+                wait = wait_.load(std::memory_order_relaxed);
+                if (wait & writeMask) {
+                    Entry* entry = nullptr;
+                    if (!wq_.pop(entry)) {
+                        if (++spin >= kSpinCount) {
+                            spin = 0;
+                            Processer::StaticCoYield();
+                        }
+                        continue;
+                    }
+                    std::unique_ptr<Entry> ep(entry);
+                    DebugPrint(dbg_channel, "[id=%ld] Pop Notify. waiting=%d", this->getId(), (int)entry->waiting);
+
+                    if (!entry->waiting) {
+                        *pt = std::move(entry->value);
+                        wait_ -= write1;
+                        return true;
+                    }
+
+                    if (Processer::Wakeup(entry->entry, [=]{ *pt = *entry->pvalue; })) {
+                        wait_ -= write1;
+                        return true;
+                    }
+                }
+
+                if (wait_.compare_exchange_weak(wait, wait + read1,
+                            std::memory_order_acq_rel, std::memory_order_relaxed))
+                    break;
+            }
+
+            Entry *entry = new Entry();
+            entry->entry = Processer::Suspend();
+            entry->pvalue = pt;
+            rq_.push(entry);
+            DebugPrint(dbg_channel, "[id=%ld] Pop waiting.", this->getId());
+            Processer::StaticCoYield();
+            DebugPrint(dbg_channel, "[id=%ld] Pop complete.", this->getId());
+            return true;
         }
 
         ~ChannelImpl() {
@@ -225,320 +298,12 @@ private:
 
         bool Empty()
         {
-            std::unique_lock<lock_t> lock(lock_);
-            return queue_.empty();
+            return wq_.empty();
         }
 
         std::size_t Size()
         {
-            std::unique_lock<lock_t> lock(lock_);
-            return queue_.size();
-        }
-
-        // write
-        bool Push(T t, bool bWait, FastSteadyClock::time_point deadline = FastSteadyClock::time_point{})
-        {
-#if BY_FALGS
-            T* pt = &t;
-            int spin = 0;
-            while (wait_.load(std::memory_order_acquire) & readMask) {
-retry:
-                Entry* entry = nullptr;
-                if (!rq_.pop(entry)) {
-                    if (++spin >= kSpinCount) {
-                        spin = 0;
-//                        printf("spin by push\n");
-                        Processer::StaticCoYield();
-                    }
-                    continue;
-                }
-                std::unique_ptr<Entry> ep(entry);
-
-                if (Processer::Wakeup(entry->entry, [=]{ *entry->pvalue = *pt; })) {
-                    wait_ -= read1;
-                    return true;
-                }
-            }
-
-            size_t wait = wait_.load(std::memory_order_relaxed);
-            do {
-                if (wait & readMask)
-                    goto retry;
-            } while (!wait_.compare_exchange_weak(wait, wait + write1,
-                        std::memory_order_acq_rel, std::memory_order_relaxed));
-
-            Entry *entry = new Entry();
-            entry->entry = Processer::Suspend();
-            entry->pvalue = pt;
-            while (!wq_.push(entry));
-            Processer::StaticCoYield();
-            return true;
-
-#elif BY_PAIR
-            Pair here;
-            here.pt = &t;
-
-            // 1.抢pair_
-            size_t set = &here;
-            do {
-                set &= ~0x7;
-                set |= op_write;
-
-                size_t p = pair_.load(std::memory_order_relaxed);
-
-                // no reader now.
-                if (p & ~0x7 == 0) {
-                    if (p & wait_read) {
-                        std::unique_lock<lock_t> lock(lock_);
-                        if (rq_.notify_one(notify_operate::notify_write, &t))
-                            return true;
-                    }
-
-                    if (p & wait_write)
-                        set |= wait_write;
-                }
-            }
-
-#elif BY_LOCKFREE_QUEUE
-            if (closed_) return false;
-
-            size_t wSeek = ++wSeek_;
-            Slot & slot = slots_[wSeek % c_slot];
-
-            int sem = ++slot.sem;
-            if (sem == 2) {
-                // other first into
-                T* pt = nullptr;
-                for (;;) {
-                    pt = slot.wait.pvalue.load(std::memory_order_acquire);
-                    if (!pt)
-                        continue;
-
-                    break;
-                }
-
-                *pt = t;
-                slot.wait.pvalue.store(nullptr, std::memory_order_relaxed);
-                slot.sem.store(0, std::memory_order_relaxed);
-                Processer::Wakeup(slot.wait.entry);
-                return true;
-            } else if (sem == 1) {
-                // me first into
-                slot.wait.entry = Processer::Suspend();
-                slot.wait.pvalue.store(&t, std::memory_order_release);
-                Processer::StaticCoYield();
-                return true;
-            }
-
-            assert(false);
-            return false;
-
-//            if (closed_) return false;
-//            std::unique_lock<lock_t> lock(lock_);
-//            if (closed_) return false;
-//
-//            T* pt = &t;
-//            while (!rq_.empty()) {
-//                Entry entryV = rq_.front();
-//                rq_.pop();
-//                Entry* entry = &entryV;
-//                if (Processer::Wakeup(entry->entry, [=]{ *entry->pvalue = *pt; })) {
-//                    return true;
-//                }
-//            }
-////            T* pt = &t;
-////            Entry *entry;
-////            while (rq_.pop(entry)) {
-////                if (Processer::Wakeup(entry->entry, [entry, pt]{ *entry->pvalue = *pt; })) {
-////                    delete entry;
-////                    return true;
-////                }
-////                delete entry;
-////            }
-//
-//            if (closed_) return false;
-//
-////            entry = new Entry(Processer::Suspend(), &t);
-////            wq_.push(entry);
-//            wq_.emplace(Entry(Processer::Suspend(), &t));
-//            lock.unlock();
-//            Processer::StaticCoYield();
-//            return true;
-#else
-            if (closed_) return false;
-
-            std::unique_lock<lock_t> lock(lock_);
-            if (closed_) return false;
-
-            if (capacity_ == 0) {
-                // zero capacity
-                if (rCv_.notify_one(notify_write, &t))
-                    return true;
-
-                if (!bWait) return false;
-
-                if (deadline == FastSteadyClock::time_point{})
-                    wCv_.wait(lock, &t);
-                else if (wCv_.wait_until(lock, deadline, &t) == std::cv_status::timeout) {
-                    return false;
-                }
-
-                return true;
-            }
-
-            if (rCv_.notify_one(notify_write, &t))
-                return true;
-
-            while (queue_.size() >= capacity_) {
-                if (!bWait) return false;
-
-                if (deadline == FastSteadyClock::time_point{})
-                    wCv_.wait(lock, &t);
-                else if (wCv_.wait_until(lock, deadline, &t) == std::cv_status::timeout) {
-                    return false;
-                }
-            }
-
-            queue_.emplace_back(std::move(t));
-            return true;
-#endif
-        }
-
-        // read
-        bool Pop(T & t, bool bWait, FastSteadyClock::time_point deadline = FastSteadyClock::time_point{})
-        {
-#if BY_FALGS
-            T* pt = &t;
-            int spin = 0;
-            while (wait_.load(std::memory_order_acquire) & writeMask) {
-retry:
-                Entry* entry = nullptr;
-                if (!wq_.pop(entry)) {
-                    if (++spin >= kSpinCount) {
-                        spin = 0;
-                        Processer::StaticCoYield();
-                    }
-                    continue;
-                }
-                std::unique_ptr<Entry> ep(entry);
-
-                if (Processer::Wakeup(entry->entry, [=]{ *pt = *entry->pvalue; })) {
-                    wait_ -= write1;
-                    return true;
-                }
-            }
-
-            size_t wait = wait_.load(std::memory_order_relaxed);
-            do {
-                if (wait & writeMask)
-                    goto retry;
-            } while (!wait_.compare_exchange_weak(wait, wait + read1,
-                        std::memory_order_acq_rel, std::memory_order_relaxed));
-
-            Entry *entry = new Entry();
-            entry->entry = Processer::Suspend();
-            entry->pvalue = pt;
-            while (!rq_.push(entry));
-            Processer::StaticCoYield();
-            return true;
-
-#elif BY_LOCKFREE_QUEUE
-
-            size_t rSeek = ++rSeek_;
-            Slot & slot = slots_[rSeek % c_slot];
-
-            int sem = ++slot.sem;
-            if (sem == 2) {
-                // other first into
-                T* pt = nullptr;
-                for (;;) {
-                    pt = slot.wait.pvalue.load(std::memory_order_acquire);
-                    if (!pt)
-                        continue;
-
-                    break;
-                }
-
-                t = std::move(*pt);
-                slot.wait.pvalue.store(nullptr, std::memory_order_relaxed);
-                slot.sem.store(0, std::memory_order_relaxed);
-                Processer::Wakeup(slot.wait.entry);
-                return true;
-            } else if (sem == 1) {
-                // me first into
-                slot.wait.entry = Processer::Suspend();
-                slot.wait.pvalue.store(&t, std::memory_order_release);
-                Processer::StaticCoYield();
-                return true;
-            }
-
-            assert(false);
-            return false;
-
-//            std::unique_lock<lock_t> lock(lock_);
-//
-//            T* pt = &t;
-//            while (!wq_.empty()) {
-//                Entry entryV = wq_.front();
-//                wq_.pop();
-//                Entry* entry = &entryV;
-//                if (Processer::Wakeup(entry->entry, [entry, pt]{ *pt = *entry->pvalue; })) {
-//                    return true;
-//                }
-//            }
-////            Entry *entry;
-////            while (wq_.pop(entry)) {
-////                if (Processer::Wakeup(entry->entry, [entry, pt]{ *pt = *entry->pvalue; })) {
-////                    delete entry;
-////                    return true;
-////                }
-////                delete entry;
-////            }
-//
-//            if (closed_) return false;
-//
-////            entry = new Entry(Processer::Suspend(), &t);
-////            rq_.push(entry);
-//            rq_.emplace(Entry(Processer::Suspend(), &t));
-//            lock.unlock();
-//            Processer::StaticCoYield();
-//            return true;
-#else
-            std::unique_lock<lock_t> lock(lock_);
-
-            if (capacity_ == 0) {
-                // zero capacity
-                if (wCv_.notify_one(notify_read, &t))
-                    return true;
-
-                if (!bWait) return false;
-                if (closed_) return false;
-
-                if (deadline == FastSteadyClock::time_point{})
-                    rCv_.wait(lock, &t);
-                else if (rCv_.wait_until(lock, deadline, &t) == std::cv_status::timeout) {
-                    return false;
-                }
-
-                return true;
-            }
-
-            if (!queue_.empty()) {
-                t = std::move(queue_.front());
-                queue_.pop_front();
-                return true;
-            }
-
-            if (wCv_.notify_one(notify_read, &t))
-                return true;
-
-            while (queue_.empty()) {
-                if (!bWait) return false;
-                if (closed_) return false;
-            }
-
-            return true;
-#endif
+            return std::min(capacity_, wq_.size());
         }
 
         void Close()
