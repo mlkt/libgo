@@ -58,8 +58,6 @@ private:
     std::atomic_bool waiting_{false};
     bool notified_ = false;
 
-    std::shared_ptr<bool> stop_;
-
     static int s_check_;
 
 public:

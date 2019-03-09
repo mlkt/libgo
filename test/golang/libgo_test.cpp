@@ -9,7 +9,7 @@
 #define TEST_MAX_THREAD 1
 #endif
 #include "../gtest_unit/gtest_exit.h"
-#include "../profiler.h"
+//#include "../profiler.h"
 using namespace std;
 
 static const int N = 10000000;
@@ -54,7 +54,7 @@ void test_channel(int capa, int n)
     char buf[1024] = {};
     co_chan<bool> ch(capa);
     std::atomic_int c {0};
-    GProfilerScope prof;
+//    GProfilerScope prof;
     auto start = chrono::steady_clock::now();
     const int loop = std::max(TEST_MIN_THREAD / 2, 1);
     for (int i = 0; i < loop; ++i) {
@@ -118,14 +118,14 @@ int main()
 
     test_atomic();
 
-//    go []{ test_mutex(1000000); };
-//    WaitUntilNoTask();
+    go []{ test_switch(1); };
+    WaitUntilNoTask();
 
-//    go []{ test_switch(1); };
-//    WaitUntilNoTask();
+    go []{ test_switch(1000); };
+    WaitUntilNoTask();
 
-//    go []{ test_switch(1000); };
-//    WaitUntilNoTask();
+    go []{ test_mutex(1000000); };
+    WaitUntilNoTask();
 
 //    go []{ test_channel(0, 20000); };
     go []{ test_channel(0, 1000000); };

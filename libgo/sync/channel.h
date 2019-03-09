@@ -3,7 +3,6 @@
 #include "../scheduler/processer.h"
 #include "../scheduler/scheduler.h"
 #include "co_condition_variable.h"
-#include <boost/lockfree/queue.hpp>
 #include "co_mutex.h"
 #include "wait_queue.h"
 

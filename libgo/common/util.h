@@ -250,6 +250,10 @@ public:
     WeakPtr(WeakPtr && other) : impl_(nullptr), ptr_(nullptr) {
         swap(other);
     }
+    WeakPtr& operator=(WeakPtr && other) {
+        swap(other);
+        return *this;
+    }
     WeakPtr& operator=(WeakPtr const& other) {
         if (this == &other) return *this;
         reset();

@@ -85,10 +85,11 @@ public:
         }
 
         // check
+        if (count_ < std::max(posDistance_, posDistance_ + 16)) return ret;
         if (!checkFunctor_) return ret;
 
         if (!check_ || !check_->next)
-            check_ = head_;
+            check_ = pos_;
 
         for (int i = 0; check_->next && i < 2; ++i) {
             if (!checkFunctor_(static_cast<T*>(check_->next))) {
@@ -101,7 +102,7 @@ public:
                 auto temp = check_->next;
                 check_->next = check_->next->next;
                 temp->next = nullptr;
-                delete temp;
+                static_cast<T*>(temp)->DecrementRef();
                 continue;
             }
 

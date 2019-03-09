@@ -10,7 +10,7 @@ namespace co {
 int Processer::s_check_ = 0;
 
 Processer::Processer(Scheduler * scheduler, int id)
-    : scheduler_(scheduler), id_(id), stop_(scheduler->stop_)
+    : scheduler_(scheduler), id_(id)
 {
     waitQueue_.setLock(&runnableQueue_.LockRef());
 }
@@ -72,9 +72,7 @@ void Processer::Process()
     FiberScopedGuard sg;
 #endif
 
-    bool & isStop = *stop_;
-
-    while (!isStop)
+    while (!Scheduler::IsStop())
     {
         runnableQueue_.front(runningTask_);
 
@@ -94,7 +92,7 @@ void Processer::Process()
 #endif
 
         addNewQuota_ = 1;
-        while (runningTask_ && !isStop) {
+        while (runningTask_ && !Scheduler::IsStop()) {
             runningTask_->state_ = TaskState::runnable;
             runningTask_->proc_ = this;
 
