@@ -8,7 +8,7 @@
 namespace co
 {
 
-#define BY_MUTEX 0
+#define BY_MUTEX 1
 
 /// 协程锁
 class CoMutex
@@ -17,7 +17,7 @@ class CoMutex
     typedef std::mutex lock_t;
     lock_t lock_;
     bool notified_ = false;
-    ConditionVariableAny<> cv_;
+    ConditionVariableAny cv_;
 #else
     boost::lockfree::queue<Processer::SuspendEntry*, boost::lockfree::fixed_sized<false>> waitQueue_;
     LFLock notified_;

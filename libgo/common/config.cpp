@@ -84,6 +84,12 @@ int GetCurrentThreadID()
     return proc ? proc->Id() : -1;
 }
 
+uint64_t GetCurrentCoroID()
+{
+    Task* tk = Processer::GetCurrentTask();
+    return tk ? tk->id_ : 0;
+}
+
 std::string GetCurrentTimeStr()
 {
 #if defined(LIBGO_SYS_Unix)

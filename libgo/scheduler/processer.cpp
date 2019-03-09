@@ -54,10 +54,14 @@ void Processer::AddTask(SList<Task> && slist)
 void Processer::NotifyCondition()
 {
     std::unique_lock<TaskQueue::lock_t> lock(newQueue_.LockRef());
-    if (waiting_)
+    if (waiting_) {
+        DebugPrint(dbg_scheduler, "NotifyCondition for condition. [Proc(%d)] --------------------------", id_);
         cv_.notify_all();
-    else
+    }
+    else {
+        DebugPrint(dbg_scheduler, "NotifyCondition for flag. [Proc(%d)] --------------------------", id_);
         notified_ = true;
+    }
 }
 
 void Processer::Process()
@@ -195,11 +199,13 @@ void Processer::WaitCondition()
     GC();
     std::unique_lock<TaskQueue::lock_t> lock(newQueue_.LockRef());
     if (notified_) {
+        DebugPrint(dbg_scheduler, "WaitCondition by Notified. [Proc(%d)] --------------------------", id_);
         notified_ = false;
         return ;
     }
 
     waiting_ = true;
+    DebugPrint(dbg_scheduler, "WaitCondition. [Proc(%d)] --------------------------", id_);
     cv_.wait(lock);
     waiting_ = false;
 }
@@ -361,14 +367,16 @@ bool Processer::WakeupBySelf(IncursivePtr<Task> const& tkPtr, uint64_t id, std::
 
     std::unique_lock<TaskQueue::lock_t> lock(waitQueue_.LockRef());
     if (id != TaskRefSuspendId(tk)) return false;
-    DebugPrint(dbg_suspend, "tk(%s) Wakeup. tk->state_ = %s", tk->DebugInfo(), GetTaskStateName(tk->state_));
     ++ TaskRefSuspendId(tk);
     if (functor)
         functor();
     bool ret = waitQueue_.eraseWithoutLock(tk, false, false);
     (void)ret;
     assert(ret);
-    if (runnableQueue_.pushWithoutLock(tk, false) == 1 && GetCurrentProcesser() != this) {
+    size_t sizeAfterPush = runnableQueue_.pushWithoutLock(tk, false);
+    DebugPrint(dbg_suspend, "tk(%s) Wakeup. tk->state_ = %s. is-in-proc(%d). sizeAfterPush=%lu",
+            tk->DebugInfo(), GetTaskStateName(tk->state_), GetCurrentProcesser() == this, sizeAfterPush);
+    if (sizeAfterPush == 1 && GetCurrentProcesser() != this) {
         lock.unlock();
         NotifyCondition();
     }

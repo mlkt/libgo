@@ -54,7 +54,7 @@ void test_channel(int capa, int n)
     char buf[1024] = {};
     co_chan<bool> ch(capa);
     std::atomic_int c {0};
-//    GProfilerScope prof;
+    GProfilerScope prof;
     auto start = chrono::steady_clock::now();
     const int loop = std::max(TEST_MIN_THREAD / 2, 1);
     for (int i = 0; i < loop; ++i) {
@@ -132,11 +132,10 @@ int main()
 //    go []{ test_channel(0, 10000000); };
 //    go []{ test_channel(0, 10000000 * 10); };
     WaitUntilNoTask();
-    return 0;
 
-    go []{ test_channel(1, N); };
+    go []{ test_channel(1, 1000000); };
     WaitUntilNoTask();
 
-    go []{ test_channel(1000, 1000000); };
+    go []{ test_channel(10000, 1000000); };
     WaitUntilNoTask();
 }

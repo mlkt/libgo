@@ -126,24 +126,23 @@ private:
         lock_t lock_;
         const std::size_t capacity_;
         bool closed_;
-        std::deque<T> queue_;
         uint64_t dbg_mask_;
 
-        struct Entry : public WaitQueueHook {
-            Processer::SuspendEntry entry;
+        struct Entry {
+            int id;
             T* pvalue;
             T value;
-            bool waiting;
 
-            Entry() : pvalue(nullptr), waiting(true) {}
-            Entry(Processer::SuspendEntry && e, T* p) : entry(e), pvalue(p) {}
+            Entry() : pvalue(nullptr) {}
         };
 
 //        typedef boost::lockfree::queue<Entry*, boost::lockfree::capacity<1>> wait_queue_t;
 //        typedef boost::lockfree::queue<Entry*> wait_queue_t;
-        typedef WaitQueue<Entry> wait_queue_t;
-        wait_queue_t wq_;
-        wait_queue_t rq_;
+        typedef FastSteadyClock::time_point time_point_t;
+//        typedef WaitQueue<Entry, bool, bool, time_point_t> wait_queue_t;
+        typedef ConditionVariableAnyT<Entry> cond_t;
+        cond_t wq_;
+        cond_t rq_;
 
         // number of read wait << 32 | number of write wait
         atomic_t<size_t> wait_ {0};
@@ -156,36 +155,14 @@ private:
     public:
         explicit ChannelImpl(std::size_t capacity)
             : capacity_(capacity), closed_(false), dbg_mask_(dbg_all)
-            , wq_(NULL, [this](Entry* entry, size_t size){ return this->onPush(entry, size); }
-                    , capacity ? capacity + 1 : (size_t)-1, &onNotify)
-            , rq_(NULL, NULL, (size_t)-1, NULL)
+            , wq_(capacity ? capacity + 1 : (size_t)-1, &onNotify)
         {
             DebugPrint(dbg_mask_ & dbg_channel, "[id=%ld] Channel init. capacity=%lu", this->getId(), capacity);
         }
-
-        static bool check(Entry* entry) {
-            if (!entry->waiting) return true;
-            return !entry->entry.IsExpire();
-        }
         
-        bool onPush(Entry* entry, size_t size) {
-            if (size < capacity_) {
-                entry->waiting = false;
-                entry->value = *entry->pvalue;
-                return false;
-            } else {
-                entry->entry = Processer::Suspend();
-                return true;
-            }
-        }
-
-        static bool onNotify(Entry* entry) {
-            assert(entry->waiting);
-            if (Processer::Wakeup(entry->entry, [=]{ entry->value = *entry->pvalue; })) {
-                entry->waiting = false;
-                return true;
-            }
-            return false;
+        static void onNotify(Entry & entry) {
+//            entry.value = *entry.pvalue;
+//            entry.pvalue = &entry.value;
         }
 
         // write
@@ -193,30 +170,52 @@ private:
         {
             DebugPrint(dbg_channel, "[id=%ld] Push ->", this->getId());
 
-            T* pt = &t;
+            if (closed_) {
+                DebugPrint(dbg_channel, "[id=%ld] Push by closed", this->getId());
+                return false;
+            }
+
             int spin = 0;
 
             size_t wait;
             for (;;) {
                 wait = wait_.load(std::memory_order_relaxed);
                 if (wait & readMask) {
-                    Entry* entry = nullptr;
-                    if (!rq_.pop(entry)) {
+                    if (!rq_.notify_one(
+                                [&](Entry & entry)
+                                {
+                                    *entry.pvalue = t;
+                                }))
+                    {
                         if (++spin >= kSpinCount) {
                             spin = 0;
 //                            printf("spin by push\n");
                             Processer::StaticCoYield();
                         }
+
+                        if (capacity_ == 0) {
+                            if (closed_) {
+                                DebugPrint(dbg_channel, "[id=%ld] Push failed by closed.", this->getId());
+                                return false;
+                            } else if (!bWait) {
+                                DebugPrint(dbg_channel, "[id=%ld] TryPush failed.", this->getId());
+                                return false;
+                            }
+                        }
                         continue;
                     }
                     DebugPrint(dbg_channel, "[id=%ld] Push Notify.", this->getId());
-                    std::unique_ptr<Entry> ep(entry);
 
-                    if (Processer::Wakeup(entry->entry, [=]{ *entry->pvalue = *pt; })) {
-                        wait_ -= read1;
-                        return true;
+                    wait_ -= read1;
+                    return true;
+                } else if (capacity_ == 0) {
+                    if (closed_) {
+                        DebugPrint(dbg_channel, "[id=%ld] Push failed by closed.", this->getId());
+                        return false;
+                    } else if (!bWait) {
+                        DebugPrint(dbg_channel, "[id=%ld] TryPush failed.", this->getId());
+                        return false;
                     }
-                    continue;
                 }
 
                 if (wait_.compare_exchange_weak(wait, wait + write1,
@@ -224,16 +223,68 @@ private:
                     break;
             }
 
-            Entry *entry = new Entry();
-            entry->pvalue = pt;
-            if (wq_.push(entry)) {
-                DebugPrint(dbg_channel, "[id=%ld] Push waiting.", this->getId());
-                Processer::StaticCoYield();
-                DebugPrint(dbg_channel, "[id=%ld] Push complete.", this->getId());
-            } else {
-                DebugPrint(dbg_channel, "[id=%ld] Push no wait.", this->getId());
+            FakeLock lock;
+            Entry entry;
+            entry.id = GetCurrentCoroID();
+            entry.value = t;
+            auto cond = [&](size_t size) -> typename cond_t::CondRet {
+                typename cond_t::CondRet ret{true, true};
+                if (closed_) {
+                    ret.canQueue = false;
+                    return ret;
+                }
+
+                if (size < capacity_) {
+                    ret.needWait = false;
+                    DebugPrint(dbg_channel, "[id=%ld] Push no wait.", this->getId());
+                    return ret;
+                }
+
+                if (!bWait) {
+                    ret.canQueue = false;
+                    return ret;
+                }
+
+                DebugPrint(dbg_channel, "[id=%ld] Push wait.", this->getId());
+                return ret;
+            };
+            typename cond_t::cv_status cv_status;
+            if (deadline == time_point_t())
+                cv_status = wq_.wait(lock, entry, cond);
+            else
+                cv_status = wq_.wait_util(lock, deadline, entry, cond);
+
+            switch ((int)cv_status) {
+                case (int)cond_t::cv_status::no_timeout:
+                    if (closed_) {
+                        DebugPrint(dbg_channel, "[id=%ld] Push failed by closed.", this->getId());
+                        return false;
+                    }
+
+                    DebugPrint(dbg_channel, "[id=%ld] Push complete.", this->getId());
+                    return true;
+
+                case (int)cond_t::cv_status::timeout:
+                    DebugPrint(dbg_channel, "[id=%ld] Push timeout.", this->getId());
+                    wait_ -= write1;
+                    return false;
+
+                case (int)cond_t::cv_status::no_queued:
+                    if (closed_)
+                        DebugPrint(dbg_channel, "[id=%ld] Push failed by closed.", this->getId());
+                    else if (!bWait)
+                        DebugPrint(dbg_channel, "[id=%ld] TryPush failed.", this->getId());
+                    else
+                        DebugPrint(dbg_channel, "[id=%ld] Push failed.", this->getId());
+                    wait_ -= write1;
+                    return false;
+
+                default:
+                    assert(false);
+                    return false;
             }
-            return true;
+
+            return false;
         }
 
         // read
@@ -241,33 +292,45 @@ private:
         {
             DebugPrint(dbg_channel, "[id=%ld] Pop ->", this->getId());
 
-            T* pt = &t;
             int spin = 0;
 
             size_t wait;
             for (;;) {
                 wait = wait_.load(std::memory_order_relaxed);
                 if (wait & writeMask) {
-                    Entry* entry = nullptr;
-                    if (!wq_.pop(entry)) {
+
+                    if (!wq_.notify_one(
+                                [&](Entry & entry)
+                                {
+                                    t = entry.value;
+                                }))
+                    {
                         if (++spin >= kSpinCount) {
                             spin = 0;
                             Processer::StaticCoYield();
                         }
+
+                        if (closed_) {
+                            DebugPrint(dbg_channel, "[id=%ld] Pop failed by closed.", this->getId());
+                            return false;
+                        } else if (!bWait) {
+                            DebugPrint(dbg_channel, "[id=%ld] TryPop failed.", this->getId());
+                            return false;
+                        }
                         continue;
                     }
-                    std::unique_ptr<Entry> ep(entry);
-                    DebugPrint(dbg_channel, "[id=%ld] Pop Notify. waiting=%d", this->getId(), (int)entry->waiting);
 
-                    if (!entry->waiting) {
-                        *pt = std::move(entry->value);
-                        wait_ -= write1;
-                        return true;
-                    }
+                    DebugPrint(dbg_channel, "[id=%ld] Pop Notify.", this->getId());
 
-                    if (Processer::Wakeup(entry->entry, [=]{ *pt = *entry->pvalue; })) {
-                        wait_ -= write1;
-                        return true;
+                    wait_ -= write1;
+                    return true;
+                } else {
+                    if (closed_) {
+                        DebugPrint(dbg_channel, "[id=%ld] Pop failed by closed.", this->getId());
+                        return false;
+                    } else if (!bWait) {
+                        DebugPrint(dbg_channel, "[id=%ld] TryPop failed.", this->getId());
+                        return false;
                     }
                 }
 
@@ -276,14 +339,55 @@ private:
                     break;
             }
 
-            Entry *entry = new Entry();
-            entry->entry = Processer::Suspend();
-            entry->pvalue = pt;
-            rq_.push(entry);
-            DebugPrint(dbg_channel, "[id=%ld] Pop waiting.", this->getId());
-            Processer::StaticCoYield();
-            DebugPrint(dbg_channel, "[id=%ld] Pop complete.", this->getId());
-            return true;
+            FakeLock lock;
+            Entry entry;
+            entry.id = GetCurrentCoroID();
+            entry.pvalue = &t;
+            auto cond = [&](size_t size) -> typename cond_t::CondRet {
+                typename cond_t::CondRet ret{true, true};
+                if (closed_) {
+                    ret.canQueue = false;
+                    return ret;
+                }
+
+                DebugPrint(dbg_channel, "[id=%ld] Pop wait.", this->getId());
+                return ret;
+            };
+            typename cond_t::cv_status cv_status;
+            if (deadline == time_point_t())
+                cv_status = rq_.wait(lock, entry, cond);
+            else
+                cv_status = rq_.wait_util(lock, deadline, entry, cond);
+
+            switch ((int)cv_status) {
+                case (int)cond_t::cv_status::no_timeout:
+                    if (closed_) {
+                        DebugPrint(dbg_channel, "[id=%ld] Pop failed by closed.", this->getId());
+                        return false;
+                    }
+
+                    DebugPrint(dbg_channel, "[id=%ld] Pop complete.", this->getId());
+                    return true;
+
+                case (int)cond_t::cv_status::timeout:
+                    DebugPrint(dbg_channel, "[id=%ld] Pop timeout.", this->getId());
+                    wait_ -= read1;
+                    return false;
+
+                case (int)cond_t::cv_status::no_queued:
+                    if (closed_)
+                        DebugPrint(dbg_channel, "[id=%ld] Pop failed by closed.", this->getId());
+                    else
+                        DebugPrint(dbg_channel, "[id=%ld] Pop failed.", this->getId());
+                    wait_ -= read1;
+                    return false;
+
+                default:
+                    assert(false);
+                    return false;
+            }
+
+            return false;
         }
 
         ~ChannelImpl() {
@@ -303,7 +407,7 @@ private:
 
         std::size_t Size()
         {
-            return std::min(capacity_, wq_.size());
+            return std::min<size_t>(capacity_, wq_.size());
         }
 
         void Close()
@@ -311,11 +415,11 @@ private:
             std::unique_lock<lock_t> lock(lock_);
             if (closed_) return ;
 
-            DebugPrint(dbg_mask_ & dbg_channel, "[id=%ld] Channel Closed. size=%d", this->getId(), (int)queue_.size());
+            DebugPrint(dbg_mask_ & dbg_channel, "[id=%ld] Channel Closed. size=%d", this->getId(), (int)size());
 
             closed_ = true;
-//            wCv_.notify_all();
-//            rCv_.notify_all();
+            rq_.notify_all();
+            wq_.notify_all();
         }
     };
 };

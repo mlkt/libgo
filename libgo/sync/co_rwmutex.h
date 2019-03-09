@@ -14,8 +14,8 @@ class CoRWMutex
     long lockState_;  // 0:无锁, >=1:读锁, -1:写锁
 
     // 兼容原生线程
-    ConditionVariableAny<> rCv_;
-    ConditionVariableAny<> wCv_;
+    ConditionVariableAny rCv_;
+    ConditionVariableAny wCv_;
 
     // 是否写优先
     bool writePriority_;

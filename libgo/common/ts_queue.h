@@ -408,6 +408,7 @@ public:
         else if (hook == tail_) tail_ = tail_->prev;
         hook->prev = hook->next = nullptr;
         hook->check_ = nullptr;
+        assert(count_ > 0);
         -- count_;
         if (refCount)
             DecrementRef((T*)hook);
@@ -423,6 +424,7 @@ public:
         tail_ = hook;
         hook->next = nullptr;
         hook->check_ = check_;
+        DebugPrint(dbg_suspend, "pushWithoutLock before this=0x%p size=%lu", (void*)this, count_);
         ++ count_;
         if (refCount)
             IncrementRef(element);

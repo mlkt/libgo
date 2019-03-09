@@ -70,8 +70,14 @@ TEST(Channel, capacity0)
     int total_check = 0;
     for (k = 0; k < 100; ++k) {
         total_check += k;
-        go [=]{ ch << k; };
-        go [&]{ int v; ch >> v; total += v; };
+        go [=]{
+            ch << k;
+        };
+        go [&]{
+            int v;
+            ch >> v;
+            total += v;
+        };
     }
     WaitUntilNoTask();
     EXPECT_EQ(total, total_check);
@@ -82,7 +88,7 @@ TEST(Channel, capacity1)
     // nonblock
     co_chan<int> ch(1);
     EXPECT_TRUE(ch.empty());
-    int i = 0;
+    int i = -1;
 
     {
         EXPECT_EQ(ch.size(), 0u);
@@ -179,6 +185,7 @@ TEST(Channel, capacity0Try)
     co_chan<int> ch;
     int i = 0;
     // try pop
+    if (0)
     {
         go [&]{ EXPECT_FALSE(ch.TryPop(i)); EXPECT_YIELD(0); SLEEP(100); EXPECT_TRUE(ch.TryPop(i)); EXPECT_YIELD(1); };
         go [&]{ SLEEP(50); ch << 1; EXPECT_YIELD(2);};
@@ -195,7 +202,10 @@ TEST(Channel, capacity0Try)
     {
         go [&]{
             EXPECT_FALSE(ch.TryPush(1));
-            go [&] { SLEEP(50); EXPECT_TRUE(ch.TryPush(1)); };
+            go [&] { 
+                SLEEP(50);
+                EXPECT_TRUE(ch.TryPush(1));
+            };
             ch >> i;
             EXPECT_YIELD(1);
         };
@@ -273,13 +283,31 @@ TEST(Channel, capacity1Try)
     // try push
     {
         ch << 0;
-        go [&]{ EXPECT_FALSE(ch.TryPush(1)); EXPECT_YIELD(0); SLEEP(100); EXPECT_TRUE(ch.TryPush(1)); EXPECT_YIELD(1); };
-        go [&]{ SLEEP(50); ch >> i; EXPECT_YIELD(1);};
+        go [&]{
+            EXPECT_FALSE(ch.TryPush(1));
+            EXPECT_YIELD(0);
+            SLEEP(100);
+            EXPECT_TRUE(ch.TryPush(1));
+            EXPECT_YIELD(1);
+        };
+
+        go [&]{ SLEEP(50);
+            ch >> i;
+            EXPECT_YIELD(1);
+        };
+
         WaitUntilNoTask();
         EXPECT_EQ(i, 0);
 
-        go [&]{ ch >> i; EXPECT_YIELD(0);};
-        go [&]{ SLEEP(50); EXPECT_TRUE(ch.TryPush(2)); EXPECT_YIELD(1); };
+        go [&]{ ch >> i;
+            EXPECT_YIELD(0);
+        };
+
+        go [&]{ SLEEP(50);
+            EXPECT_TRUE(ch.TryPush(2));
+            EXPECT_YIELD(1);
+        };
+
         WaitUntilNoTask();
         EXPECT_EQ(i, 1);
     }

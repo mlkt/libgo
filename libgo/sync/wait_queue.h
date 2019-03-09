@@ -18,7 +18,6 @@ class WaitQueue
 
 public:
     typedef std::function<bool(T*)> Functor;
-    typedef std::function<bool(T*, size_t)> OnPushFunctor;
     typedef std::mutex lock_t;
     lock_t lock_;
     WaitQueueHook dummy_;
@@ -30,10 +29,14 @@ public:
     const size_t posDistance_;
     volatile size_t count_;
     Functor posFunctor_;
-    OnPushFunctor onPush_;
+
+    struct CondRet
+    {
+        bool canQueue;
+        bool needWait;
+    };
 
     explicit WaitQueue(Functor checkFunctor = NULL,
-            OnPushFunctor onPush = NULL,
             size_t posD = -1, Functor const& posFunctor = NULL)
         : posDistance_(posD)
     {
@@ -43,7 +46,6 @@ public:
         checkFunctor_ = checkFunctor;
         pos_ = nullptr;
         posFunctor_ = posFunctor;
-        onPush_ = onPush;
         count_ = 0;
     }
 
@@ -65,12 +67,15 @@ public:
         return count_;
     }
 
-    bool push(T* ptr)
+    CondRet push(T* ptr, std::function<CondRet(size_t)> const& cond = NULL)
     {
         std::unique_lock<lock_t> lock(lock_);
-        bool ret = true;
-        if (onPush_)
-            ret = onPush_(ptr, count_);
+        CondRet ret{true, true};
+        if (cond) {
+            ret = cond(count_);
+            if (!ret.canQueue)
+                return ret;
+        }
 
         tail_->next = ptr;
         ptr->next = nullptr;
@@ -82,7 +87,7 @@ public:
         // check
         if (!checkFunctor_) return ret;
 
-        if (!check_->next)
+        if (!check_ || !check_->next)
             check_ = head_;
 
         for (int i = 0; check_->next && i < 2; ++i) {
@@ -112,6 +117,7 @@ public:
 
         ptr = static_cast<T*>(head_->next);
         if (tail_ == head_->next) tail_ = head_;
+        if (check_ == head_->next) check_ = check_->next;
         head_->next = head_->next->next;
         ptr->next = nullptr;
 
@@ -122,6 +128,8 @@ public:
             pos_ = pos_->next;
             if (ok) break;
         }
+
+        --count_;
         return true;
     }
 
