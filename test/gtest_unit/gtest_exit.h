@@ -10,11 +10,11 @@
 #define DEBUG_CHECK_POINT
 
 #ifndef TEST_MIN_THREAD
-#define TEST_MIN_THREAD 1
+#define TEST_MIN_THREAD 4
 #endif
 
 #ifndef TEST_MAX_THREAD
-#define TEST_MAX_THREAD 1
+#define TEST_MAX_THREAD 4
 #endif
 
 struct startScheduler {
