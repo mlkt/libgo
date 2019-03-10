@@ -127,6 +127,8 @@ private:
 
     WaitQueue<Entry> queue_;
 
+    bool relockAfterWait_ = true;
+
 public:
     typedef typename WaitQueue<Entry>::CondRet CondRet;
 
@@ -145,6 +147,8 @@ public:
     {
     }
     ~ConditionVariableAnyT() {}
+
+    void setRelockAfterWait(bool b) { relockAfterWait_ = b; }
 
     template <typename LockType>
     cv_status wait(LockType & lock,
@@ -324,7 +328,8 @@ private:
             entry->suspendFlags.store(flag, std::memory_order_release);   // release
             DebugPrint(dbg_channel, "cv::wait -> suspend_end");
             Processer::StaticCoYield();
-            lock.lock();
+            if (relockAfterWait_)
+                lock.lock();
             return entry->noTimeoutLock.try_lock() ?
                 cv_status::timeout :
                 cv_status::no_timeout;
@@ -335,7 +340,8 @@ private:
             entry->suspendFlags.store(flag, std::memory_order_release);   // release
             DebugPrint(dbg_channel, "cv::wait -> suspend_end");
             threadSuspend(entry->nativeThreadEntry->cv, threadLock, time);
-            lock.lock();
+            if (relockAfterWait_)
+                lock.lock();
             return entry->noTimeoutLock.try_lock() ?
                 cv_status::timeout :
                 cv_status::no_timeout;

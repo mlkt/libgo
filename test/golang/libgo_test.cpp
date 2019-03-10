@@ -124,18 +124,25 @@ int main()
     go []{ test_switch(1000); };
     WaitUntilNoTask();
 
-    go []{ test_mutex(1000000); };
-    WaitUntilNoTask();
+//    go []{ test_mutex(1000000); };
+//    WaitUntilNoTask();
 
-//    go []{ test_channel(0, 20000); };
     go []{ test_channel(0, 1000000); };
-//    go []{ test_channel(0, 10000000); };
-//    go []{ test_channel(0, 10000000 * 10); };
     WaitUntilNoTask();
 
     go []{ test_channel(1, 1000000); };
     WaitUntilNoTask();
 
-    go []{ test_channel(10000, 1000000); };
+//    go []{ test_channel(63, 1000000); };
+//    WaitUntilNoTask();
+//
+//    go []{ test_channel(64, 1000000); };
+//    WaitUntilNoTask();
+
+//    go []{ test_channel(9999, 10000000); };
+//    WaitUntilNoTask();
+
+//    go []{ test_channel(5, 10); };
+    go []{ test_channel(10000, 10000000); };
     WaitUntilNoTask();
 }

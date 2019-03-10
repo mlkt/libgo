@@ -115,10 +115,10 @@ func main() {
 
 	n *= int64(nThreads)
 
-	t = time.Now()
-	Mutex(N)
-	nanos = time.Since(t).Nanoseconds()
-	fmt.Printf("%s    %d    %d ns/op    %d w/s\n", "Mutex", n, nanos/n, 100000 * n / nanos);
+//	t = time.Now()
+//	Mutex(N)
+//	nanos = time.Since(t).Nanoseconds()
+//	fmt.Printf("%s    %d    %d ns/op    %d w/s\n", "Mutex", n, nanos/n, 100000 * n / nanos);
 
 	t = time.Now()
 	Channel(0, N)
