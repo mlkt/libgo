@@ -84,7 +84,7 @@ int GetCurrentThreadID()
     return proc ? proc->Id() : -1;
 }
 
-uint64_t GetCurrentCoroID()
+int GetCurrentCoroID()
 {
     Task* tk = Processer::GetCurrentTask();
     return tk ? tk->id_ : 0;

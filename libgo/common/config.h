@@ -176,7 +176,7 @@ struct CoroutineOptions
 
 int GetCurrentProcessID();
 int GetCurrentThreadID();
-uint64_t GetCurrentCoroID();
+int GetCurrentCoroID();
 std::string GetCurrentTimeStr();
 const char* BaseFile(const char* file);
 const char* PollEvent2Str(short int event);
@@ -227,7 +227,7 @@ extern std::mutex gDbgLock;
         if (UNLIKELY(::co::CoroutineOptions::getInstance().debug & (type))) { \
             ::co::ErrnoStore es; \
             std::unique_lock<std::mutex> lock(::co::gDbgLock); \
-            fprintf(::co::CoroutineOptions::getInstance().debug_output, "[%s][%05d][%04d][%06lu]%s:%d:(%s)\t " fmt "\n", \
+            fprintf(::co::CoroutineOptions::getInstance().debug_output, "[%s][%05d][%04d][%06d]%s:%d:(%s)\t " fmt "\n", \
                     ::co::GetCurrentTimeStr().c_str(),\
                     ::co::GetCurrentProcessID(), ::co::GetCurrentThreadID(), ::co::GetCurrentCoroID(), \
                     ::co::BaseFile(__FILE__), __LINE__, __FUNCTION__, ##__VA_ARGS__); \

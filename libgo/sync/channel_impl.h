@@ -8,6 +8,8 @@ namespace co
 template <typename T>
 struct ChannelImpl : public IdCounter<ChannelImpl<T>>
 {
+    virtual ~ChannelImpl() {}
+
     virtual bool Push(T t, bool bWait,
             FastSteadyClock::time_point deadline = FastSteadyClock::time_point{}) = 0;
     virtual bool Pop(T & t, bool bWait,
